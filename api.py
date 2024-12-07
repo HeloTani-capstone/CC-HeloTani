@@ -7,12 +7,13 @@ import numpy as np
 import os
 import tensorflow as tf
 from datetime import datetime
+import requests  # Tambahkan ini
 
 # Initialize Flask app
 app = Flask(__name__)
 
 # Load the model
-MODEL_PATH = r'D:\DATA-DATA\Nicho\Bangkit\CAPSTONE\HeloTani_API\model\my_model_15.h5'
+MODEL_PATH = 'model/my_model_15.h5'
 model = load_model(MODEL_PATH)
 
 # Define categories
@@ -32,6 +33,25 @@ CATEGORIES = {
     36: 'wheat yellow rust', 37: 'whitefly cotton', 38: 'wilt',
     39: 'yellow rust sugarcane'
 }
+
+# Define public bucket URL
+BUCKET_URL = "https://storage.googleapis.com/image_uploaded"
+
+def upload_to_bucket(file_path, file_name):
+    """
+    Uploads a file to the public bucket via HTTP PUT.
+    Returns the public URL of the uploaded file.
+    """
+    try:
+        with open(file_path, "rb") as file_data:
+            upload_url = f"{BUCKET_URL}/{file_name}"
+            response = requests.put(upload_url, data=file_data, headers={"Content-Type": "application/octet-stream"})
+            if response.status_code in [200, 201]:
+                return upload_url
+            else:
+                raise ValueError(f"Failed to upload file: {response.status_code}, {response.text}")
+    except Exception as e:
+        raise ValueError(f"Error during upload: {e}")
 
 # Helper function to preprocess image
 def preprocess_image(image_path):
@@ -56,15 +76,17 @@ def predict():
         return jsonify({'error': 'No file selected'}), 400
 
     try:
-        # Save file to uploads and image_uploaded
-        file_path = os.path.join('uploads', file.filename)
-        output_dir = r'D:\DATA-DATA\Nicho\Bangkit\CAPSTONE\HeloTani_API\image_uploaded'
-        os.makedirs('uploads', exist_ok=True)
-        os.makedirs(output_dir, exist_ok=True)
-        file.save(file_path)
+        # Save file temporarily with a timestamped name
+        temp_dir = 'uploads'
+        os.makedirs(temp_dir, exist_ok=True)
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')  # Format: YYYYMMDD_HHMMSS
+        original_filename = file.filename
+        new_filename = f"{timestamp}_predicted"
+        temp_path = os.path.join(temp_dir, new_filename)
+        file.save(temp_path)
 
         # Preprocess the image
-        image = preprocess_image(file_path)
+        image = preprocess_image(temp_path)
 
         # Make prediction
         start_time = datetime.now()
@@ -76,14 +98,11 @@ def predict():
         predicted_class = np.argmax(probabilities)
         class_name = CATEGORIES.get(predicted_class, 'Unknown')
 
-        # Save preprocessed image for debugging
-        output_path = os.path.join(output_dir, f"processed_{file.filename}")
-        preprocessed_image = (image[0] * 255).astype(np.uint8)  # Rescale back to [0,255]
-        preprocessed_image = Image.fromarray(preprocessed_image)
-        preprocessed_image.save(output_path.replace('.npy', '.jpg'))  # Save as .jpg
+        # Upload original image to public bucket
+        public_url = upload_to_bucket(temp_path, new_filename)
 
         # Clean up temporary file
-        os.remove(file_path)
+        os.remove(temp_path)
 
         # Return response
         return jsonify({
@@ -91,12 +110,17 @@ def predict():
             'class_name': class_name,
             'probabilities': probabilities.tolist(),
             'processing_time': processing_time,
-            'saved_image': output_path.replace('.npy', '.jpg')
+            'uploaded_image_url': public_url
         })
 
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+@app.route('/health')
+def health_check():
+    return "OK", 200
+
 
 # Run the app
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
+
